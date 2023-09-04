@@ -18,75 +18,71 @@ $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123
 
 import os
 import time
-import math
 import pickle
+import argparse
 
 import numpy as np
 import torch
 
 from model import GPTConfig, GPT
 
-# -----------------------------------------------------------------------------
-# default config values designed to train a gpt2 (124M) on OpenWebText
-# I/O
-out_dir = 'out'
-eval_interval = 2000
-log_interval = 1
-eval_iters = 200
-eval_only = False # if True, script exits right after the first eval
-always_save_checkpoint = True # if True, always save a checkpoint after each eval
+parser = argparse.ArgumentParser(description='tinyGPT training script')
+parser.add_argument('config_filename', type=str, help='config filename')
+parser.add_argument('--out_dir', type=str, default='out', help='output directory')
+parser.add_argument('--eval_interval', type=int, default=2000, help='how many iterations between evaluations')
+parser.add_argument('--log_interval', type=int, default=1, help='how many iterations between logging')
+parser.add_argument('--eval_iters', type=int, default=200, help='how many iterations for each evaluation')
+parser.add_argument('--eval_only', action='store_true', help='if true, run evaluation only')
+parser.add_argument('--always_save_checkpoint', action='store_true', help='if true, always save a checkpoint after each evaluation')
 # data
-dataset = 'openwebtext'
-gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
-batch_size = 12 # if gradient_accumulation_steps > 1, this is the micro-batch size
-block_size = 1024
+parser.add_argument('--dataset', type=str, default='shakespeare_char', help='dataset name')
+parser.add_argument('--gradient_accumulation_steps', type=int, default=5 * 8, help='number of gradient accumulation steps')
+parser.add_argument('--batch_size', type=int, default=12, help='batch size')
+parser.add_argument('--block_size', type=int, default=1024, help='block size')
 # model
-n_layer = 12
-n_head = 12
-n_embd = 768
-dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
-bias = False # do we use bias inside LayerNorm and Linear layers?
+parser.add_argument('--n_layer', type=int, default=12, help='number of transformer layers')
+parser.add_argument('--n_head', type=int, default=12, help='number of attention heads')
+parser.add_argument('--n_embd', type=int, default=768, help='embedding size')
+parser.add_argument('--dropout', type=float, default=0.0, help='dropout rate')
+parser.add_argument('--bias', action='store_true', help='use bias in layernorm')
 # adamw optimizer
-learning_rate = 6e-4 # max learning rate
-max_iters = 600000 # total number of training iterations
-weight_decay = 1e-1
-beta1 = 0.9
-beta2 = 0.95
-grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
+parser.add_argument('--learning_rate', type=float, default=6e-4, help='maximum learning rate')
+parser.add_argument('--max_iters', type=int, default=600000, help='maximum number of iterations')
+parser.add_argument('--weight_decay', type=float, default=1e-1, help='weight decay rate')
+parser.add_argument('--beta1', type=float, default=0.9, help='beta1 for adamw')
+parser.add_argument('--beta2', type=float, default=0.95, help='beta2 for adamw')
+parser.add_argument('--grad_clip', type=float, default=1.0, help='gradient clipping value, 0 means no clipping')
 # system
-device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
-dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
-# -----------------------------------------------------------------------------
-config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
-exec(open('configurator.py').read()) # overrides from command line or config file
-config = {k: globals()[k] for k in config_keys} # will be useful for logging
-# -----------------------------------------------------------------------------
+parser.add_argument('--device', type=str, default='cuda', help='cuda, cpu or mps')
+parser.add_argument('--dtype', type=str, default='bfloat16', help='float32, bfloat16 or float16')
+args = parser.parse_args()
+config = vars(args)
 
 # various inits, derived attributes, I/O setup
-tokens_per_iter = gradient_accumulation_steps * batch_size * block_size
+tokens_per_iter = args.gradient_accumulation_steps * args.batch_size * args.block_size
 print(f"tokens per iteration will be: {tokens_per_iter:,}")
 
 torch.manual_seed(1337)
 torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
 torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
-device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.autocast
+device_type = 'cuda' if 'cuda' in args.device else 'cpu' # for later use in torch.autocast
 # note: float16 data type will automatically use a GradScaler
-ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
+ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[args.dtype]
 
 # poor man's data loader
-data_dir = os.path.join('data', dataset)
+data_dir = os.path.join('data', args.dataset)
 train_data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
 val_data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
 def get_batch(split):
     data = train_data if split == 'train' else val_data
-    ix = torch.randint(len(data) - block_size, (batch_size,))
-    x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
-    y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
+    ix = torch.randint(len(data) - args.block_size, (args.batch_size,))
+    x = torch.stack([torch.from_numpy((data[i:i+args.block_size]).astype(np.int64)) for i in ix])
+    y = torch.stack([torch.from_numpy((data[i+1:i+1+args.block_size]).astype(np.int64)) for i in ix])
     if device_type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
-        x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
+        x, y = x.pin_memory().to(args.device, non_blocking=True), y.pin_memory().to(args.device, non_blocking=True)
     else:
-        x, y = x.to(device), y.to(device)
+        x, y = x.to(args.device), y.to(args.device)
     return x, y
 
 iter_num = 0
@@ -102,8 +98,8 @@ if os.path.exists(meta_path):
     print(f"found vocab_size = {meta_vocab_size} (inside {meta_path})")
 
 # model init
-model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
-                  bias=bias, vocab_size=None, dropout=dropout) # start with model_args from command line
+model_args = dict(n_layer=args.n_layer, n_head=args.n_head, n_embd=args.n_embd, block_size=args.block_size,
+                  bias=args.bias, vocab_size=None, dropout=args.dropout) # start with model_args from command line
 # init a new model from scratch
 print("Initializing a new model from scratch")
 # determine the vocab size we'll use for from-scratch training
@@ -114,16 +110,16 @@ gptconf = GPTConfig(**model_args)
 model = GPT(gptconf)
 
 # crop down the model block size if desired, using model surgery
-if block_size < model.config.block_size:
-    model.crop_block_size(block_size)
-    model_args['block_size'] = block_size # so that the checkpoint will have the right value
-model.to(device)
+if args.block_size < model.config.block_size:
+    model.crop_block_size(args.block_size)
+    model_args['block_size'] = args.block_size # so that the checkpoint will have the right value
+model.to(args.device)
 
 # initialize a GradScaler. If enabled=False scaler is a no-op
-scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
+scaler = torch.cuda.amp.GradScaler(enabled=(args.dtype == 'float16'))
 
 # optimizer
-optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
+optimizer = model.configure_optimizers(args.weight_decay, args.learning_rate, (args.beta1, args.beta2), device_type)
 
 # helps estimate an arbitrarily accurate loss over either split using many batches
 @torch.no_grad()
@@ -131,8 +127,8 @@ def estimate_loss():
     out = {}
     model.eval()
     for split in ['train', 'val']:
-        losses = torch.zeros(eval_iters)
-        for k in range(eval_iters):
+        losses = torch.zeros(args.eval_iters)
+        for k in range(args.eval_iters):
             X, Y = get_batch(split)
             logits, loss = model(X, Y)
             losses[k] = loss.item()
@@ -147,13 +143,13 @@ local_iter_num = 0 # number of iterations in the lifetime of this process
 while True:
 
     for param_group in optimizer.param_groups:
-        param_group['lr'] = learning_rate
+        param_group['lr'] = args.learning_rate
 
     # evaluate the loss on train/val sets and write checkpoints
-    if iter_num % eval_interval == 0:
+    if iter_num % args.eval_interval == 0:
         losses = estimate_loss()
         print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
-        if losses['val'] < best_val_loss or always_save_checkpoint:
+        if losses['val'] < best_val_loss or args.always_save_checkpoint:
             best_val_loss = losses['val']
             if iter_num > 0:
                 checkpoint = {
@@ -164,24 +160,24 @@ while True:
                     'best_val_loss': best_val_loss,
                     'config': config,
                 }
-                print(f"saving checkpoint to {out_dir}")
-                torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
-    if iter_num == 0 and eval_only:
+                print(f"saving checkpoint to {args.out_dir}")
+                torch.save(checkpoint, os.path.join(args.out_dir, 'ckpt.pt'))
+    if iter_num == 0 and args.eval_only:
         break
 
     # forward backward update, with optional gradient accumulation to simulate larger batch size
     # and using the GradScaler if data type is float16
-    for micro_step in range(gradient_accumulation_steps):
+    for micro_step in range(args.gradient_accumulation_steps):
         logits, loss = model(X, Y)
-        loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
+        loss = loss / args.gradient_accumulation_steps # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
         X, Y = get_batch('train')
         # backward pass, with gradient scaling if training in fp16
         scaler.scale(loss).backward()
     # clip the gradient
-    if grad_clip != 0.0:
+    if args.grad_clip != 0.0:
         scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
     # step the optimizer and scaler if training in fp16
     scaler.step(optimizer)
     scaler.update()
@@ -192,14 +188,14 @@ while True:
     t1 = time.time()
     dt = t1 - t0
     t0 = t1
-    if iter_num % log_interval == 0:
+    if iter_num % args.log_interval == 0:
         # get loss as float. note: this is a CPU-GPU sync point
         # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
-        lossf = loss.item() * gradient_accumulation_steps
+        lossf = loss.item() * args.gradient_accumulation_steps
         print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms")
     iter_num += 1
     local_iter_num += 1
 
     # termination conditions
-    if iter_num > max_iters:
+    if iter_num > args.max_iters:
         break
