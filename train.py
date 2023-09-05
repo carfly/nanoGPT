@@ -27,16 +27,15 @@ import torch
 from model import GPTConfig, GPT
 
 parser = argparse.ArgumentParser(description='tinyGPT training script')
-parser.add_argument('config_filename', type=str, help='config filename')
-parser.add_argument('--out_dir', type=str, default='out', help='output directory')
+parser.add_argument('--out_dir', type=str, default='out-shakespeare-char', help='output directory')
 parser.add_argument('--eval_interval', type=int, default=2000, help='how many iterations between evaluations')
 parser.add_argument('--log_interval', type=int, default=1, help='how many iterations between logging')
 parser.add_argument('--eval_iters', type=int, default=200, help='how many iterations for each evaluation')
 parser.add_argument('--eval_only', action='store_true', help='if true, run evaluation only')
-parser.add_argument('--always_save_checkpoint', action='store_true', help='if true, always save a checkpoint after each evaluation')
+parser.add_argument('--always_save_checkpoint', action='store_false', help='if true, always save a checkpoint after each evaluation')
 # data
 parser.add_argument('--dataset', type=str, default='shakespeare_char', help='dataset name')
-parser.add_argument('--gradient_accumulation_steps', type=int, default=5 * 8, help='number of gradient accumulation steps')
+parser.add_argument('--gradient_accumulation_steps', type=int, default=1, help='number of gradient accumulation steps')
 parser.add_argument('--batch_size', type=int, default=12, help='batch size')
 parser.add_argument('--block_size', type=int, default=1024, help='block size')
 # model
@@ -61,6 +60,8 @@ config = vars(args)
 # various inits, derived attributes, I/O setup
 tokens_per_iter = args.gradient_accumulation_steps * args.batch_size * args.block_size
 print(f"tokens per iteration will be: {tokens_per_iter:,}")
+
+os.makedirs(args.out_dir, exist_ok=True)
 
 torch.manual_seed(1337)
 torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
