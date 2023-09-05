@@ -24,7 +24,7 @@ import argparse
 import numpy as np
 import torch
 
-from model import GPTConfig, GPT
+from model import GPT
 
 parser = argparse.ArgumentParser(description='tinyGPT training script')
 parser.add_argument('--out_dir', type=str, default='out-shakespeare-char', help='output directory')
@@ -39,6 +39,7 @@ parser.add_argument('--gradient_accumulation_steps', type=int, default=1, help='
 parser.add_argument('--batch_size', type=int, default=12, help='batch size')
 parser.add_argument('--block_size', type=int, default=1024, help='block size')
 # model
+parser.add_argument('--vocab_size', type=int, default=None, help='vocab size, if None will use the vocab size of the dataset')
 parser.add_argument('--n_layer', type=int, default=12, help='number of transformer layers')
 parser.add_argument('--n_head', type=int, default=12, help='number of attention heads')
 parser.add_argument('--n_embd', type=int, default=768, help='embedding size')
@@ -55,7 +56,6 @@ parser.add_argument('--grad_clip', type=float, default=1.0, help='gradient clipp
 parser.add_argument('--device', type=str, default='cuda', help='cuda, cpu or mps')
 parser.add_argument('--dtype', type=str, default='bfloat16', help='float32, bfloat16 or float16')
 args = parser.parse_args()
-config = vars(args)
 
 # various inits, derived attributes, I/O setup
 tokens_per_iter = args.gradient_accumulation_steps * args.batch_size * args.block_size
@@ -91,29 +91,15 @@ best_val_loss = 1e9
 
 # attempt to derive vocab_size from the dataset
 meta_path = os.path.join(data_dir, 'meta.pkl')
-meta_vocab_size = None
 if os.path.exists(meta_path):
     with open(meta_path, 'rb') as f:
         meta = pickle.load(f)
-    meta_vocab_size = meta['vocab_size']
-    print(f"found vocab_size = {meta_vocab_size} (inside {meta_path})")
+    args.vocab_size = meta['vocab_size']
+    print(f"found vocab_size = {args.vocab_size} (inside {meta_path})")
 
-# model init
-model_args = dict(n_layer=args.n_layer, n_head=args.n_head, n_embd=args.n_embd, block_size=args.block_size,
-                  bias=args.bias, vocab_size=None, dropout=args.dropout) # start with model_args from command line
 # init a new model from scratch
 print("Initializing a new model from scratch")
-# determine the vocab size we'll use for from-scratch training
-if meta_vocab_size is None:
-    print("defaulting to vocab_size of GPT-2 to 50304 (50257 rounded up for efficiency)")
-model_args['vocab_size'] = meta_vocab_size if meta_vocab_size is not None else 50304
-gptconf = GPTConfig(**model_args)
-model = GPT(gptconf)
-
-# crop down the model block size if desired, using model surgery
-if args.block_size < model.config.block_size:
-    model.crop_block_size(args.block_size)
-    model_args['block_size'] = args.block_size # so that the checkpoint will have the right value
+model = GPT(args)
 model.to(args.device)
 
 # initialize a GradScaler. If enabled=False scaler is a no-op
@@ -156,10 +142,9 @@ while True:
                 checkpoint = {
                     'model': model.state_dict(),
                     'optimizer': optimizer.state_dict(),
-                    'model_args': model_args,
+                    'model_args': args,
                     'iter_num': iter_num,
-                    'best_val_loss': best_val_loss,
-                    'config': config,
+                    'best_val_loss': best_val_loss
                 }
                 print(f"saving checkpoint to {args.out_dir}")
                 torch.save(checkpoint, os.path.join(args.out_dir, 'ckpt.pt'))

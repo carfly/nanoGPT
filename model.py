@@ -92,32 +92,22 @@ class Block(nn.Module):
         x = x + self.mlp(self.ln_2(x))
         return x
 
-@dataclass
-class GPTConfig:
-    block_size: int = 1024
-    vocab_size: int = 50304 # GPT-2 vocab_size of 50257, padded up to nearest multiple of 64 for efficiency
-    n_layer: int = 12
-    n_head: int = 12
-    n_embd: int = 768
-    dropout: float = 0.0
-    bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
-
 class GPT(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, args):
         super().__init__()
-        assert config.vocab_size is not None
-        assert config.block_size is not None
-        self.config = config
+        assert args.vocab_size is not None
+        assert args.block_size is not None
+        self.config = args
 
         self.transformer = nn.ModuleDict(dict(
-            wte = nn.Embedding(config.vocab_size, config.n_embd),
-            wpe = nn.Embedding(config.block_size, config.n_embd),
-            drop = nn.Dropout(config.dropout),
-            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+            wte = nn.Embedding(args.vocab_size, args.n_embd),
+            wpe = nn.Embedding(args.block_size, args.n_embd),
+            drop = nn.Dropout(args.dropout),
+            h = nn.ModuleList([Block(args) for _ in range(args.n_layer)]),
+            ln_f = LayerNorm(args.n_embd, bias=args.bias),
         ))
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.lm_head = nn.Linear(args.n_embd, args.vocab_size, bias=False)
         # with weight tying when using torch.compile() some warnings get generated:
         # "UserWarning: functional_call was passed multiple values for tied weights.
         # This behavior is deprecated and will be an error in future versions"
@@ -129,7 +119,7 @@ class GPT(nn.Module):
         # apply special scaled init to the residual projections, per GPT-2 paper
         for pn, p in self.named_parameters():
             if pn.endswith('c_proj.weight'):
-                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * args.n_layer))
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
